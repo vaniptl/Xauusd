@@ -271,6 +271,11 @@ if result is None or result[0] is None:
         """, unsafe_allow_html=True)
     st.stop()
 
+if result is not None and len(result) != 5:
+    st.session_state.last_result = None
+    result = None
+if result is None or result[0] is None:
+    st.rerun()
 state, df_1h, sr_all, signals_out, positions = result
 
 # ── PRICE BAR ──────────────────────────────────────────────────────────────────
