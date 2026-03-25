@@ -1,9 +1,6 @@
 """
-Database layer — SQLite persistence.
-Fix #1: DB stored at /tmp/xauusd_trading.db so Streamlit Cloud keeps it alive
-         across reruns within the same session. For true 24/7 persistence,
-         mount a persistent volume or use Streamlit Secrets + external DB.
-Fix #3: account_balance table tracks running equity with PnL compounded in.
+Database layer — SQLite with automatic schema migration.
+If the DB already exists from an older version, missing columns are added safely.
 """
 import sqlite3
 import pandas as pd
@@ -11,11 +8,12 @@ from datetime import datetime, date
 from core.config import CONFIG
 import os
 
-# Use /tmp so file persists across reruns on Streamlit Cloud
-DB_PATH = os.environ.get("XAUUSD_DB_PATH",
-          os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                       CONFIG["db_path"]))
+DB_PATH = os.environ.get(
+    "XAUUSD_DB_PATH",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), CONFIG["db_path"])
+)
 
+# Base CREATE statements (safe — use IF NOT EXISTS)
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS signals (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,14 +30,10 @@ CREATE TABLE IF NOT EXISTS signals (
     status      TEXT DEFAULT 'OPEN',
     outcome     TEXT,
     pnl_r       REAL,
-    pnl_usd     REAL,
-    close_price REAL,
-    close_ts    TEXT,
     lots        REAL,
     risk_usd    REAL,
     notes       TEXT
 );
-
 CREATE TABLE IF NOT EXISTS account (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          TEXT,
@@ -48,7 +42,6 @@ CREATE TABLE IF NOT EXISTS account (
     balance     REAL,
     note        TEXT
 );
-
 CREATE TABLE IF NOT EXISTS strategy_stats (
     strategy    TEXT PRIMARY KEY,
     wins        INTEGER DEFAULT 0,
@@ -58,7 +51,6 @@ CREATE TABLE IF NOT EXISTS strategy_stats (
     active      INTEGER DEFAULT 1,
     last_update TEXT
 );
-
 CREATE TABLE IF NOT EXISTS daily_goal (
     date_str    TEXT PRIMARY KEY,
     target_usd  REAL DEFAULT 20.0,
@@ -66,6 +58,13 @@ CREATE TABLE IF NOT EXISTS daily_goal (
     trades      INTEGER DEFAULT 0
 );
 """
+
+# Columns that may be missing in older DB files — added via migration
+MIGRATIONS = [
+    ("signals", "pnl_usd",    "REAL"),
+    ("signals", "close_price","REAL"),
+    ("signals", "close_ts",   "TEXT"),
+]
 
 
 class Database:
@@ -79,8 +78,20 @@ class Database:
         return c
 
     def _init(self):
+        """Create tables + run migrations to add any missing columns."""
         with self.conn() as c:
             c.executescript(CREATE_SQL)
+
+        # Migration: add columns that didn't exist in old schema
+        with self.conn() as c:
+            for table, col, col_type in MIGRATIONS:
+                existing = [
+                    row[1] for row in
+                    c.execute(f"PRAGMA table_info({table})").fetchall()
+                ]
+                if col not in existing:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
         # Seed account balance if empty
         with self.conn() as c:
             cnt = c.execute("SELECT COUNT(*) FROM account").fetchone()[0]
@@ -93,7 +104,6 @@ class Database:
 
     # ── ACCOUNT / BALANCE ─────────────────────────────────────────────────────
     def get_balance(self) -> float:
-        """Current live account balance (initial + all PnL compounded)."""
         with self.conn() as c:
             row = c.execute(
                 "SELECT balance FROM account ORDER BY id DESC LIMIT 1"
@@ -101,7 +111,6 @@ class Database:
         return round(float(row[0]), 2) if row else CONFIG["risk"]["account_balance"]
 
     def add_pnl(self, pnl_usd: float, note: str = ""):
-        """Add PnL to account balance (positive = profit, negative = loss)."""
         old_bal = self.get_balance()
         new_bal = old_bal + pnl_usd
         with self.conn() as c:
@@ -114,7 +123,6 @@ class Database:
         return round(new_bal, 2)
 
     def deposit(self, amount: float):
-        """Manual deposit / balance reset."""
         old_bal = self.get_balance()
         new_bal = old_bal + amount
         with self.conn() as c:
@@ -126,16 +134,13 @@ class Database:
 
     def get_account_history(self) -> pd.DataFrame:
         with self.conn() as c:
-            return pd.read_sql(
-                "SELECT * FROM account ORDER BY id ASC", c
-            )
+            return pd.read_sql("SELECT * FROM account ORDER BY id ASC", c)
 
     def monthly_pnl(self) -> pd.DataFrame:
-        """Monthly PnL aggregated from account events."""
         with self.conn() as c:
             df = pd.read_sql(
-                "SELECT ts, amount FROM account WHERE event IN ('TRADE_WIN','TRADE_LOSS')",
-                c
+                "SELECT ts, amount FROM account "
+                "WHERE event IN ('TRADE_WIN','TRADE_LOSS')", c
             )
         if df.empty:
             return df
@@ -162,10 +167,6 @@ class Database:
 
     def close_trade(self, sid: int, close_price: float,
                     outcome: str, pnl_usd: float, pnl_r: float):
-        """
-        Close a trade: record outcome, close price, update account balance.
-        This is how PnL compounds into the account.
-        """
         close_ts = datetime.utcnow().isoformat()
         with self.conn() as c:
             c.execute(
@@ -173,14 +174,12 @@ class Database:
                 "pnl_usd=?, close_price=?, close_ts=? WHERE id=?",
                 (outcome, pnl_r, pnl_usd, close_price, close_ts, sid)
             )
-        # Compound PnL into account
         self.add_pnl(pnl_usd, f"Trade #{sid} {outcome}")
-        # Update daily goal
         self._update_daily_goal(pnl_usd)
         return self.get_balance()
 
     def update_outcome(self, sid: int, outcome: str, pnl_r: float):
-        """Legacy method — kept for compatibility."""
+        """Legacy compat — no pnl_usd compound here."""
         with self.conn() as c:
             c.execute(
                 "UPDATE signals SET status='CLOSED', outcome=?, pnl_r=? WHERE id=?",
@@ -188,11 +187,6 @@ class Database:
             )
 
     def auto_close_open_trades(self, current_price: float):
-        """
-        Check all OPEN trades against current price.
-        Auto-close if SL or TP has been hit.
-        Returns list of closed trade dicts.
-        """
         open_trades = self.get_signals(status="OPEN")
         closed = []
         for _, row in open_trades.iterrows():
@@ -200,8 +194,7 @@ class Database:
             dire = row["direction"]
             sl   = float(row["sl"])
             tp   = float(row["tp"])
-            lots = float(row.get("lots", 0.01))
-            risk = float(row.get("risk_usd", 0))
+            risk = float(row.get("risk_usd") or 0)
 
             hit_tp = (dire == "long"  and current_price >= tp) or \
                      (dire == "short" and current_price <= tp)
@@ -211,15 +204,11 @@ class Database:
             if hit_tp:
                 rr      = float(row["rr"])
                 pnl_usd = risk * rr
-                pnl_r   = rr
-                self.close_trade(sid, current_price, "WIN", pnl_usd, pnl_r)
+                self.close_trade(sid, current_price, "WIN", pnl_usd, rr)
                 closed.append({"id": sid, "outcome": "WIN", "pnl_usd": pnl_usd})
             elif hit_sl:
-                pnl_usd = -risk
-                pnl_r   = -1.0
-                self.close_trade(sid, current_price, "LOSS", pnl_usd, pnl_r)
-                closed.append({"id": sid, "outcome": "LOSS", "pnl_usd": pnl_usd})
-
+                self.close_trade(sid, current_price, "LOSS", -risk, -1.0)
+                closed.append({"id": sid, "outcome": "LOSS", "pnl_usd": -risk})
         return closed
 
     # ── DAILY GOAL ────────────────────────────────────────────────────────────
@@ -227,7 +216,7 @@ class Database:
         today = date.today().isoformat()
         with self.conn() as c:
             c.execute(
-                "INSERT INTO daily_goal (date_str, target_usd, achieved, trades) "
+                "INSERT INTO daily_goal (date_str,target_usd,achieved,trades) "
                 "VALUES (?,20.0,?,1) ON CONFLICT(date_str) DO UPDATE SET "
                 "achieved=achieved+?, trades=trades+1",
                 (today, pnl_usd, pnl_usd)
@@ -238,7 +227,7 @@ class Database:
             date_str = date.today().isoformat()
         with self.conn() as c:
             row = c.execute(
-                "SELECT target_usd, achieved, trades FROM daily_goal WHERE date_str=?",
+                "SELECT target_usd,achieved,trades FROM daily_goal WHERE date_str=?",
                 (date_str,)
             ).fetchone()
         if row:
@@ -288,12 +277,25 @@ class Database:
 
     def summary_stats(self) -> dict:
         with self.conn() as c:
-            total    = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
-            open_    = c.execute("SELECT COUNT(*) FROM signals WHERE status='OPEN'").fetchone()[0]
-            wins     = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='WIN'").fetchone()[0]
-            losses   = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='LOSS'").fetchone()[0]
-            avg_sc   = c.execute("SELECT AVG(score) FROM signals WHERE score>0").fetchone()[0]
-            total_pnl= c.execute("SELECT SUM(pnl_usd) FROM signals WHERE status='CLOSED'").fetchone()[0]
+            total = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            open_ = c.execute("SELECT COUNT(*) FROM signals WHERE status='OPEN'").fetchone()[0]
+            wins  = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='WIN'").fetchone()[0]
+            losses= c.execute("SELECT COUNT(*) FROM signals WHERE outcome='LOSS'").fetchone()[0]
+            avg_sc= c.execute("SELECT AVG(score) FROM signals WHERE score>0").fetchone()[0]
+            # Use pnl_r (always existed) as fallback if pnl_usd column is new/empty
+            try:
+                total_pnl = c.execute(
+                    "SELECT SUM(pnl_usd) FROM signals WHERE status='CLOSED'"
+                ).fetchone()[0]
+            except Exception:
+                total_pnl = None
+            if total_pnl is None:
+                try:
+                    total_pnl = c.execute(
+                        "SELECT SUM(pnl_r) FROM signals WHERE status='CLOSED'"
+                    ).fetchone()[0]
+                except Exception:
+                    total_pnl = 0
         wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
         return {
             "total_signals": total,
@@ -302,5 +304,5 @@ class Database:
             "losses":        losses,
             "win_rate":      round(wr, 1),
             "avg_score":     round(avg_sc, 2) if avg_sc else 0,
-            "total_pnl_usd": round(total_pnl, 2) if total_pnl else 0,
+            "total_pnl_usd": round(float(total_pnl), 2) if total_pnl else 0,
         }
