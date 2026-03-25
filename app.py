@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time, sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -120,7 +120,7 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
 
-    run_btn = st.button("▶ RUN NOW", use_container_width=True)
+    run_btn = st.button("▶ RUN NOW", width='stretch')
 
     # Daily goal progress
     goal = db.get_daily_goal()
@@ -154,7 +154,7 @@ with st.sidebar:
         st.rerun()
 
 # ── TITLE BAR ──────────────────────────────────────────────────────────────────
-now_utc   = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+now_utc   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 bot_active = st.session_state.auto_running
 st.markdown(
     f"""
@@ -209,7 +209,7 @@ def run_pipeline(min_score):
     regime   = rc.classify(df_1h)
     rw       = rc.weights(regime)
     htf_bias = rc.get_htf_bias(df_4h, df_1d)
-    session  = SessionAnalyzer().get(datetime.utcnow())
+    session  = SessionAnalyzer().get(datetime.now(timezone.utc))
 
     sre    = SREngine()
     sr_all = sre.detect_all_tf(
@@ -307,7 +307,7 @@ if trigger:
         # Validate result is 5-tuple before saving
         if result is not None and len(result) == 5:
             st.session_state.last_result = result
-            st.session_state.last_fetch  = datetime.utcnow()
+            st.session_state.last_fetch  = datetime.now(timezone.utc)
 
 result = st.session_state.get("last_result")
 
@@ -362,7 +362,7 @@ st.markdown(live_price_bar(
     state["price"], state["change"], state["ch_pct"],
     state["session"], REGIME_LABELS.get(state["regime"], state["regime"]),
     state["atr"], state["adx"], state["rsi"],
-    datetime.utcnow().strftime("%H:%M:%S")
+    datetime.now(timezone.utc).strftime("%H:%M:%S")
 ), unsafe_allow_html=True)
 
 # Auto-close notification
@@ -707,11 +707,11 @@ if not df_1h.empty:
     for i in range(1, 4):
         fig.update_xaxes(gridcolor="#1e2736", zeroline=False, tickfont=dict(size=8), row=i, col=1)
         fig.update_yaxes(gridcolor="#1e2736", zeroline=False, tickfont=dict(size=8), row=i, col=1)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width='stretch', config={"displayModeBar": False})
 
 # ── STATUS + AUTO REFRESH ──────────────────────────────────────────────────────
 last_f    = st.session_state.get("last_fetch")
-remaining = max(0, 900 - int((datetime.utcnow()-last_f).total_seconds())) if last_f else None
+remaining = max(0, 900 - int((datetime.now(timezone.utc)-last_f).total_seconds())) if last_f else None
 st.markdown(status_footer(
     data_ok=not df_1h.empty, wfo_ok=True, tg_ok=False, db_ok=True,
     next_cycle_secs=remaining
