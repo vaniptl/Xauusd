@@ -1,11 +1,31 @@
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 import yfinance as yf
 import logging
+import time
 from core.config import CONFIG
-from core.indicators import ema, sma, rsi, atr, adx, macd, bbands
 
 log = logging.getLogger("XAUUSD.data")
+
+
+def _yf_download_with_retry(sym, period, interval, retries=3, wait=12, **kwargs):
+    """yfinance download with retry on rate limit."""
+    for attempt in range(retries):
+        try:
+            df = yf.download(sym, period=period, interval=interval,
+                             progress=False, auto_adjust=True, **kwargs)
+            return df
+        except Exception as e:
+            msg = str(e).lower()
+            if "rate" in msg or "too many" in msg or "429" in msg:
+                log.warning("Rate limited %s, waiting %ds (attempt %d/%d)",
+                            sym, wait, attempt+1, retries)
+                time.sleep(wait)
+            else:
+                log.warning("yf error %s: %s", sym, e)
+                return pd.DataFrame()
+    return pd.DataFrame()
 
 
 class DataEngine:
@@ -17,14 +37,7 @@ class DataEngine:
         df = pd.DataFrame()
         for sym in [CONFIG["symbol"], CONFIG["symbol_spot"]]:
             try:
-                raw = yf.download(
-                    sym,
-                    period=tf["period"],
-                    interval=tf["interval"],
-                    progress=False,
-                    auto_adjust=True,
-                    multi_level_index=False,
-                )
+                raw = _yf_download_with_retry(sym, tf["period"], tf["interval"], multi_level_index=False)
                 if not raw.empty:
                     df = raw
                     break
@@ -59,10 +72,8 @@ class DataEngine:
 
         if tf_name == "4H":
             df = df.resample("4h").agg({
-                "open":   "first",
-                "high":   "max",
-                "low":    "min",
-                "close":  "last",
+                "open": "first", "high": "max",
+                "low": "min", "close": "last",
                 "volume": "sum",
             }).dropna()
 
@@ -76,8 +87,7 @@ class DataEngine:
             try:
                 raw = yf.download(
                     sym, period=period, interval=interval,
-                    progress=False, auto_adjust=True,
-                    multi_level_index=False,
+                    progress=False, auto_adjust=True, multi_level_index=False
                 )
                 if not raw.empty:
                     df = raw
@@ -86,7 +96,7 @@ class DataEngine:
                 try:
                     raw = yf.download(
                         sym, period=period, interval=interval,
-                        progress=False, auto_adjust=True,
+                        progress=False, auto_adjust=True
                     )
                     if not raw.empty:
                         df = raw
@@ -116,43 +126,30 @@ class DataEngine:
     def add_indicators(self, df):
         if df.empty or len(df) < 50:
             return df
-        c  = df.copy()
+        c = df.copy()
         em = CONFIG["ema"]
-
-        # EMAs
-        c["ema_fast"] = ema(c["close"], em["fast"])
-        c["ema_med"]  = ema(c["close"], em["medium"])
-        c["ema_slow"] = ema(c["close"], em["slow"])
-
-        # ATR
-        c["atr"]     = atr(c["high"], c["low"], c["close"], 14)
-        c["atr_pct"] = c["atr"] / c["close"]
-
-        # ADX
-        adx_df = adx(c["high"], c["low"], c["close"], 14)
-        c["adx"]    = adx_df["ADX"]
-        c["di_pos"] = adx_df["DMP"]
-        c["di_neg"] = adx_df["DMN"]
-
-        # RSI
-        c["rsi"] = rsi(c["close"], 14)
-
-        # MACD
-        macd_df       = macd(c["close"])
-        c["macd"]     = macd_df["MACD"]
-        c["macd_sig"] = macd_df["MACDs"]
-        c["macd_hist"]= macd_df["MACDh"]
-
-        # Bollinger Bands
-        bb_df   = bbands(c["close"], 20)
-        c["bb_l"] = bb_df["BBL"]
-        c["bb_m"] = bb_df["BBM"]
-        c["bb_u"] = bb_df["BBU"]
-
-        # Volume MA & ratio
-        c["vol_ma"]    = sma(c["volume"], 20)
+        c["ema_fast"] = ta.ema(c["close"], length=em["fast"])
+        c["ema_med"]  = ta.ema(c["close"], length=em["medium"])
+        c["ema_slow"] = ta.ema(c["close"], length=em["slow"])
+        c["atr"]      = ta.atr(c["high"], c["low"], c["close"], length=14)
+        c["atr_pct"]  = c["atr"] / c["close"]
+        adx = ta.adx(c["high"], c["low"], c["close"], length=14)
+        if adx is not None and not adx.empty:
+            c["adx"]    = adx.iloc[:, 0]
+            c["di_pos"] = adx.iloc[:, 1]
+            c["di_neg"] = adx.iloc[:, 2]
+        c["rsi"]       = ta.rsi(c["close"], length=14)
+        macd = ta.macd(c["close"])
+        if macd is not None and not macd.empty:
+            c["macd"]     = macd.iloc[:, 0]
+            c["macd_sig"] = macd.iloc[:, 1]
+        bb = ta.bbands(c["close"], length=20)
+        if bb is not None and not bb.empty:
+            c["bb_l"] = bb.iloc[:, 0]
+            c["bb_m"] = bb.iloc[:, 1]
+            c["bb_u"] = bb.iloc[:, 2]
+        c["vol_ma"]    = ta.sma(c["volume"], length=20)
         c["vol_ratio"] = c["volume"] / c["vol_ma"].replace(0, np.nan)
-
         return c
 
     def get(self, tf):
