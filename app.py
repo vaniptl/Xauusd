@@ -38,36 +38,34 @@ st.set_page_config(
 )
 
 # ── MOBILE-RESPONSIVE CSS ──────────────────────────────────────────────────────
-MOBILE_CSS = """
+# Replace your MOBILE_CSS with this to stop it from hiding
+STAY_OPEN_CSS = """
 <style>
-/* Force ALL sidebar toggle buttons visible regardless of Streamlit version */
-[data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"],
-button[data-testid="baseButton-header"],
-section[data-testid="stSidebarCollapsedControl"] button,
-div[data-testid="collapsedControl"] {
-  display: flex !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  pointer-events: auto !important;
-}
-/* Sidebar base */
-[data-testid="stSidebar"] {
-  min-width: 240px !important;
-}
-/* Make sidebar content scrollable on small screens */
-[data-testid="stSidebar"] > div {
-  overflow-y: auto !important;
-}
-/* Mobile adjustments */
-@media (max-width: 640px) {
-  .main .block-container {
-    padding: 0.4rem 0.4rem !important;
-  }
-}
+    /* Force the sidebar to be visible and un-collapsible */
+    [data-testid="stSidebar"] {
+        left: 0 !important;
+        visibility: visible !important;
+        transform: translate3d(0px, 0px, 0px) !important;
+    }
+    
+    /* Push the main content to the right so it doesn't overlap */
+    [data-testid="stMainViewContainer"] {
+        margin-left: 260px !important;
+    }
+
+    /* Hide the 'X' button so you can't accidentally close it */
+    button[kind="headerNoPadding"] {
+        display: none !important;
+    }
+    
+    /* Adjust for actual mobile phones so it doesn't break the screen */
+    @media (max-width: 640px) {
+        [data-testid="stMainViewContainer"] { margin-left: 0 !important; }
+        [data-testid="stSidebar"] { width: 100% !important; }
+    }
 </style>
 """
-st.markdown(TERMINAL_CSS + MOBILE_CSS, unsafe_allow_html=True)
+st.markdown(STAY_OPEN_CSS, unsafe_allow_html=True)
 
 # ── SESSION STATE ──────────────────────────────────────────────────────────────
 for key, default in [
