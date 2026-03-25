@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -87,7 +87,7 @@ if not acct_df.empty:
         xaxis=dict(gridcolor="#1e2736", tickfont=dict(size=8)),
         yaxis=dict(gridcolor="#1e2736", tickfont=dict(size=9), tickprefix="$"),
     )
-    st.plotly_chart(fig_eq, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig_eq, width='stretch', config={"displayModeBar": False})
 
 # ── SUMMARY METRICS ────────────────────────────────────────────────────────────
 m1,m2,m3,m4,m5,m6 = st.columns(6)
@@ -119,9 +119,9 @@ st.markdown(section_header("COMPLETE TRADE LOG",
 # Date filter
 df1, df2, df3 = st.columns(3)
 with df1:
-    start_d = st.date_input("From", value=datetime.utcnow().date() - timedelta(days=30))
+    start_d = st.date_input("From", value=datetime.now(timezone.utc).date() - timedelta(days=30))
 with df2:
-    end_d   = st.date_input("To",   value=datetime.utcnow().date())
+    end_d   = st.date_input("To",   value=datetime.now(timezone.utc).date())
 with df3:
     stat_f  = st.selectbox("Status", ["ALL", "OPEN", "CLOSED"])
 
@@ -172,9 +172,9 @@ else:
         return ""
 
     styled = tbl.style\
-        .applymap(cbs,  subset=["B/S"])\
-        .applymap(cos,  subset=["STATUS"])\
-        .applymap(cpnl, subset=["P&L ($)"])\
+        .map(cbs,  subset=["B/S"])\
+        .map(cos,  subset=["STATUS"])\
+        .map(cpnl, subset=["P&L ($)"])\
         .set_properties(**{
             "font-family":"IBM Plex Mono,monospace",
             "font-size":"10px","background":"#0d111a","color":"#c8d0e0",
@@ -185,7 +185,7 @@ else:
             ("border-bottom","1px solid #1e2736"),("padding","5px 8px"),
         ]},{"selector":"td","props":[("padding","4px 8px")]}])
 
-    st.dataframe(styled, use_container_width=True, height=450, hide_index=True)
+    st.dataframe(styled, width='stretch', height=450, hide_index=True)
 
 # ── MONTHLY P&L CHART ──────────────────────────────────────────────────────────
 st.markdown("---")
@@ -209,7 +209,7 @@ if not monthly_df.empty:
         xaxis=dict(gridcolor="#1e2736", tickfont=dict(size=9)),
         yaxis=dict(gridcolor="#1e2736", tickfont=dict(size=9), tickprefix="$"),
     )
-    st.plotly_chart(fig_m, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig_m, width='stretch', config={"displayModeBar": False})
 else:
     st.info("No closed trades yet — monthly chart will populate automatically.")
 
@@ -226,11 +226,11 @@ if not goal_df.empty:
     goal_df["hit"] = goal_df["achieved"] >= goal_df["target_usd"]
     goal_df["pct"] = (goal_df["achieved"] / goal_df["target_usd"] * 100).round(1)
     st.dataframe(
-        goal_df.style.applymap(
+        goal_df.style.map(
             lambda v: "color:#26d17a;font-weight:bold" if v is True
                       else "color:#e05555" if v is False else "",
             subset=["hit"]
-        ).applymap(
+        ).map(
             lambda v: "color:#26d17a" if isinstance(v,(int,float)) and v>=0
                       else "color:#e05555" if isinstance(v,(int,float)) and v<0 else "",
             subset=["achieved"]
@@ -242,7 +242,7 @@ if not goal_df.empty:
             ("text-transform","uppercase"),("letter-spacing","1px"),
             ("border-bottom","1px solid #1e2736"),
         ]}]),
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
     )
 
 # ── EXPORT ────────────────────────────────────────────────────────────────────
@@ -250,6 +250,6 @@ st.markdown("---")
 st.download_button(
     "⬇  EXPORT FULL HISTORY CSV",
     all_sig.to_csv(index=False),
-    f"xauusd_history_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+    f"xauusd_history_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.csv",
     "text/csv"
 )
