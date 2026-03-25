@@ -40,25 +40,30 @@ st.set_page_config(
 # ── MOBILE-RESPONSIVE CSS ──────────────────────────────────────────────────────
 MOBILE_CSS = """
 <style>
-/* Force hamburger/arrow always visible on all screen sizes */
-[data-testid="collapsedControl"] {
+/* Force ALL sidebar toggle buttons visible regardless of Streamlit version */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+button[data-testid="baseButton-header"],
+section[data-testid="stSidebarCollapsedControl"] button,
+div[data-testid="collapsedControl"] {
   display: flex !important;
   visibility: visible !important;
   opacity: 1 !important;
+  pointer-events: auto !important;
 }
-section[data-testid="stSidebarCollapsedControl"] {
-  display: flex !important;
-  visibility: visible !important;
-}
-/* Sidebar width */
+/* Sidebar base */
 [data-testid="stSidebar"] {
   min-width: 240px !important;
-  max-width: 280px !important;
 }
-/* Mobile: stack columns */
+/* Make sidebar content scrollable on small screens */
+[data-testid="stSidebar"] > div {
+  overflow-y: auto !important;
+}
+/* Mobile adjustments */
 @media (max-width: 640px) {
-  .main .block-container { padding: 0.4rem !important; }
-  section[data-testid="stSidebar"] { min-width: 200px !important; }
+  .main .block-container {
+    padding: 0.4rem 0.4rem !important;
+  }
 }
 </style>
 """
@@ -154,23 +159,26 @@ with st.sidebar:
         st.rerun()
 
 # ── TITLE BAR ──────────────────────────────────────────────────────────────────
-now_utc   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+now_utc    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 bot_active = st.session_state.auto_running
-st.markdown(
-    f"""
-    <div style="display:flex;justify-content:space-between;align-items:center;
-                border-bottom:1px solid #1e2736;padding-bottom:6px;margin-bottom:10px;
-                flex-wrap:wrap;gap:6px">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
-                  color:#f0a500;letter-spacing:2px">◈ XAUUSD TERMINAL</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        {'<span style="background:#0a2818;color:#26d17a;border:1px solid #1a4a30;font-family:IBM Plex Mono,monospace;font-size:9px;padding:2px 8px;letter-spacing:1px">● BOT ON</span>' if bot_active else ""}
-        <span style="font-family:IBM Plex Mono,monospace;font-size:9px;color:#4a5568">{now_utc} UTC</span>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True
+_bot_badge = (
+    '<span style="background:#0a2818;color:#26d17a;border:1px solid #1a4a30;'
+    'font-family:IBM Plex Mono,monospace;font-size:9px;padding:2px 8px;'
+    'letter-spacing:1px">&#9679; BOT ON</span>'
+    if bot_active else ""
 )
+_title_html = (
+    '<div style="display:flex;justify-content:space-between;align-items:center;'
+    'border-bottom:1px solid #1e2736;padding-bottom:6px;margin-bottom:10px;'
+    'flex-wrap:wrap;gap:6px">'
+    '<div style="font-family:IBM Plex Mono,monospace;font-size:13px;font-weight:600;'
+    'color:#f0a500;letter-spacing:2px">&#9672; XAUUSD TERMINAL</div>'
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    + _bot_badge +
+    '<span style="font-family:IBM Plex Mono,monospace;font-size:9px;color:#4a5568">'
+    + now_utc + ' UTC</span></div></div>'
+)
+st.markdown(_title_html, unsafe_allow_html=True)
 
 # ── COT (cached 1h) ───────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
