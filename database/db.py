@@ -4,7 +4,7 @@ If the DB already exists from an older version, missing columns are added safely
 """
 import sqlite3
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from core.config import CONFIG
 import os
 
@@ -99,7 +99,7 @@ class Database:
                 bal = CONFIG["risk"]["account_balance"]
                 c.execute(
                     "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
-                    (datetime.utcnow().isoformat(), "DEPOSIT", bal, bal, "Initial deposit")
+                    (datetime.now(timezone.utc).isoformat(), "DEPOSIT", bal, bal, "Initial deposit")
                 )
 
     # ── ACCOUNT / BALANCE ─────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ class Database:
         with self.conn() as c:
             c.execute(
                 "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
-                (datetime.utcnow().isoformat(),
+                (datetime.now(timezone.utc).isoformat(),
                  "TRADE_WIN" if pnl_usd >= 0 else "TRADE_LOSS",
                  pnl_usd, new_bal, note)
             )
@@ -128,7 +128,7 @@ class Database:
         with self.conn() as c:
             c.execute(
                 "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
-                (datetime.utcnow().isoformat(), "DEPOSIT", amount, new_bal, "Manual deposit")
+                (datetime.now(timezone.utc).isoformat(), "DEPOSIT", amount, new_bal, "Manual deposit")
             )
         return round(new_bal, 2)
 
@@ -167,7 +167,7 @@ class Database:
 
     def close_trade(self, sid: int, close_price: float,
                     outcome: str, pnl_usd: float, pnl_r: float):
-        close_ts = datetime.utcnow().isoformat()
+        close_ts = datetime.now(timezone.utc).isoformat()
         with self.conn() as c:
             c.execute(
                 "UPDATE signals SET status='CLOSED', outcome=?, pnl_r=?, "
@@ -272,7 +272,7 @@ class Database:
                 "consec_loss=excluded.consec_loss, sharpe=excluded.sharpe, "
                 "active=excluded.active, last_update=excluded.last_update",
                 (strategy, st["wins"], st["losses"], st["consec_loss"],
-                 st["sharpe"], int(st["active"]), datetime.utcnow().isoformat())
+                 st["sharpe"], int(st["active"]), datetime.now(timezone.utc).isoformat())
             )
 
     def summary_stats(self) -> dict:
