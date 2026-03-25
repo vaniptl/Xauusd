@@ -34,28 +34,32 @@ st.set_page_config(
     page_title="XAUUSD TERMINAL",
     page_icon="🟡",
     layout="wide",
-    initial_sidebar_state="collapsed",   # Fix #7: collapsed by default on mobile
+    initial_sidebar_state="expanded",   # Always show sidebar
 )
 
 # ── MOBILE-RESPONSIVE CSS ──────────────────────────────────────────────────────
 MOBILE_CSS = """
 <style>
-/* Fix #7: Mobile responsive */
-@media (max-width: 768px) {
-  .main .block-container { padding: 0.5rem 0.5rem !important; }
-  [data-testid="stMetricValue"] { font-size: 14px !important; }
-  h1 { font-size: 11px !important; }
-  .stColumns > div { min-width: 100% !important; flex: 100% !important; }
-}
-/* Hamburger always visible */
+/* Force hamburger/arrow always visible on all screen sizes */
 [data-testid="collapsedControl"] {
-  display: block !important;
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+section[data-testid="stSidebarCollapsedControl"] {
+  display: flex !important;
   visibility: visible !important;
 }
-/* Sidebar toggle button */
-button[kind="header"] { display: block !important; }
-/* Keep sidebar accessible */
-[data-testid="stSidebar"] { min-width: 260px !important; }
+/* Sidebar width */
+[data-testid="stSidebar"] {
+  min-width: 240px !important;
+  max-width: 280px !important;
+}
+/* Mobile: stack columns */
+@media (max-width: 640px) {
+  .main .block-container { padding: 0.4rem !important; }
+  section[data-testid="stSidebar"] { min-width: 200px !important; }
+}
 </style>
 """
 st.markdown(TERMINAL_CSS + MOBILE_CSS, unsafe_allow_html=True)
@@ -150,20 +154,23 @@ with st.sidebar:
         st.rerun()
 
 # ── TITLE BAR ──────────────────────────────────────────────────────────────────
-now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-bot_badge = '<span style="background:#0a2818;color:#26d17a;border:1px solid #1a4a30;font-family:IBM Plex Mono,monospace;font-size:9px;padding:2px 8px;letter-spacing:1px;margin-right:6px">● BOT ON</span>' if st.session_state.auto_running else ""
-st.markdown(f"""
-<div style="display:flex;justify-content:space-between;align-items:center;
-            border-bottom:1px solid #1e2736;padding-bottom:6px;margin-bottom:10px;
-            flex-wrap:wrap;gap:6px">
-  <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
-              color:#f0a500;letter-spacing:2px">◈ XAUUSD TERMINAL</div>
-  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-    {bot_badge}
-    <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:#4a5568">{now_utc} UTC</span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+now_utc   = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+bot_active = st.session_state.auto_running
+st.markdown(
+    f"""
+    <div style="display:flex;justify-content:space-between;align-items:center;
+                border-bottom:1px solid #1e2736;padding-bottom:6px;margin-bottom:10px;
+                flex-wrap:wrap;gap:6px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
+                  color:#f0a500;letter-spacing:2px">◈ XAUUSD TERMINAL</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        {'<span style="background:#0a2818;color:#26d17a;border:1px solid #1a4a30;font-family:IBM Plex Mono,monospace;font-size:9px;padding:2px 8px;letter-spacing:1px">● BOT ON</span>' if bot_active else ""}
+        <span style="font-family:IBM Plex Mono,monospace;font-size:9px;color:#4a5568">{now_utc} UTC</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 # ── COT (cached 1h) ───────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
