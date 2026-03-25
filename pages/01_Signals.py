@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -163,9 +163,9 @@ def color_pnl(v):
         return ""
 
 styled = tbl.style\
-    .applymap(color_direction, subset=["direction"])\
-    .applymap(color_outcome,   subset=["outcome"] if "outcome" in tbl.columns else [])\
-    .applymap(color_pnl,       subset=["pnl_usd","pnl_r"] if "pnl_usd" in tbl.columns else [])\
+    .map(color_direction, subset=["direction"])\
+    .map(color_outcome,   subset=["outcome"] if "outcome" in tbl.columns else [])\
+    .map(color_pnl,       subset=["pnl_usd","pnl_r"] if "pnl_usd" in tbl.columns else [])\
     .set_properties(**{
         "font-family": "IBM Plex Mono,monospace",
         "font-size":   "10px",
@@ -179,12 +179,12 @@ styled = tbl.style\
                   ("letter-spacing","1px"),("border-bottom","1px solid #1e2736")]
     }])
 
-st.dataframe(styled, use_container_width=True, height=480, hide_index=True)
+st.dataframe(styled, width='stretch', height=480, hide_index=True)
 
 # ── EXPORT ────────────────────────────────────────────────────────────────────
 st.download_button(
     "⬇  EXPORT CSV",
     dff.to_csv(index=False),
-    f"xauusd_signals_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+    f"xauusd_signals_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.csv",
     "text/csv"
 )
