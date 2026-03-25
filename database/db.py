@@ -1,7 +1,20 @@
+"""
+Database layer — SQLite persistence.
+Fix #1: DB stored at /tmp/xauusd_trading.db so Streamlit Cloud keeps it alive
+         across reruns within the same session. For true 24/7 persistence,
+         mount a persistent volume or use Streamlit Secrets + external DB.
+Fix #3: account_balance table tracks running equity with PnL compounded in.
+"""
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from core.config import CONFIG
+import os
+
+# Use /tmp so file persists across reruns on Streamlit Cloud
+DB_PATH = os.environ.get("XAUUSD_DB_PATH",
+          os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                       CONFIG["db_path"]))
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -19,10 +32,23 @@ CREATE TABLE IF NOT EXISTS signals (
     status      TEXT DEFAULT 'OPEN',
     outcome     TEXT,
     pnl_r       REAL,
+    pnl_usd     REAL,
+    close_price REAL,
+    close_ts    TEXT,
     lots        REAL,
     risk_usd    REAL,
     notes       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS account (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT,
+    event       TEXT,
+    amount      REAL,
+    balance     REAL,
+    note        TEXT
+);
+
 CREATE TABLE IF NOT EXISTS strategy_stats (
     strategy    TEXT PRIMARY KEY,
     wins        INTEGER DEFAULT 0,
@@ -32,67 +58,214 @@ CREATE TABLE IF NOT EXISTS strategy_stats (
     active      INTEGER DEFAULT 1,
     last_update TEXT
 );
-CREATE TABLE IF NOT EXISTS wfo_runs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts          TEXT,
-    strategy    TEXT,
-    params      TEXT,
-    is_sharpe   REAL,
-    oos_sharpe  REAL,
-    is_winrate  REAL,
-    oos_winrate REAL
-);
-CREATE TABLE IF NOT EXISTS cot_data (
-    date        TEXT PRIMARY KEY,
-    comm_long   REAL,
-    comm_short  REAL,
-    spec_long   REAL,
-    spec_short  REAL,
-    bias        TEXT
+
+CREATE TABLE IF NOT EXISTS daily_goal (
+    date_str    TEXT PRIMARY KEY,
+    target_usd  REAL DEFAULT 20.0,
+    achieved    REAL DEFAULT 0.0,
+    trades      INTEGER DEFAULT 0
 );
 """
 
 
 class Database:
     def __init__(self, path=None):
-        self.path = path or CONFIG["db_path"]
+        self.path = path or DB_PATH
         self._init()
 
     def conn(self):
-        return sqlite3.connect(self.path)
+        c = sqlite3.connect(self.path, check_same_thread=False)
+        c.execute("PRAGMA journal_mode=WAL")
+        return c
 
     def _init(self):
         with self.conn() as c:
             c.executescript(CREATE_SQL)
+        # Seed account balance if empty
+        with self.conn() as c:
+            cnt = c.execute("SELECT COUNT(*) FROM account").fetchone()[0]
+            if cnt == 0:
+                bal = CONFIG["risk"]["account_balance"]
+                c.execute(
+                    "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
+                    (datetime.utcnow().isoformat(), "DEPOSIT", bal, bal, "Initial deposit")
+                )
 
-    def save_signal(self, sig, sizing=None):
+    # ── ACCOUNT / BALANCE ─────────────────────────────────────────────────────
+    def get_balance(self) -> float:
+        """Current live account balance (initial + all PnL compounded)."""
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT balance FROM account ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return round(float(row[0]), 2) if row else CONFIG["risk"]["account_balance"]
+
+    def add_pnl(self, pnl_usd: float, note: str = ""):
+        """Add PnL to account balance (positive = profit, negative = loss)."""
+        old_bal = self.get_balance()
+        new_bal = old_bal + pnl_usd
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
+                (datetime.utcnow().isoformat(),
+                 "TRADE_WIN" if pnl_usd >= 0 else "TRADE_LOSS",
+                 pnl_usd, new_bal, note)
+            )
+        return round(new_bal, 2)
+
+    def deposit(self, amount: float):
+        """Manual deposit / balance reset."""
+        old_bal = self.get_balance()
+        new_bal = old_bal + amount
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO account (ts,event,amount,balance,note) VALUES (?,?,?,?,?)",
+                (datetime.utcnow().isoformat(), "DEPOSIT", amount, new_bal, "Manual deposit")
+            )
+        return round(new_bal, 2)
+
+    def get_account_history(self) -> pd.DataFrame:
+        with self.conn() as c:
+            return pd.read_sql(
+                "SELECT * FROM account ORDER BY id ASC", c
+            )
+
+    def monthly_pnl(self) -> pd.DataFrame:
+        """Monthly PnL aggregated from account events."""
+        with self.conn() as c:
+            df = pd.read_sql(
+                "SELECT ts, amount FROM account WHERE event IN ('TRADE_WIN','TRADE_LOSS')",
+                c
+            )
+        if df.empty:
+            return df
+        df["ts"]    = pd.to_datetime(df["ts"])
+        df["month"] = df["ts"].dt.to_period("M").astype(str)
+        return df.groupby("month")["amount"].sum().reset_index()
+
+    # ── SIGNALS / TRADES ──────────────────────────────────────────────────────
+    def save_signal(self, sig, sizing=None) -> int:
         with self.conn() as c:
             cur = c.execute(
                 "INSERT INTO signals "
-                "(ts,strategy,direction,entry,sl,tp,rr,score,regime,session,lots,risk_usd,notes)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    sig.ts, sig.strategy, sig.direction,
-                    sig.entry, sig.sl, sig.tp, sig.rr, sig.score,
-                    sig.regime, sig.session,
-                    sizing.get("lots", 0) if sizing else 0,
-                    sizing.get("risk_usd", 0) if sizing else 0,
-                    sig.notes,
-                )
+                "(ts,strategy,direction,entry,sl,tp,rr,score,"
+                " regime,session,lots,risk_usd,notes) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sig.ts, sig.strategy, sig.direction,
+                 sig.entry, sig.sl, sig.tp, sig.rr, sig.score,
+                 sig.regime, sig.session,
+                 sizing.get("lots", 0)     if sizing else 0,
+                 sizing.get("risk_usd", 0) if sizing else 0,
+                 sig.notes)
             )
             return cur.lastrowid
 
-    def update_outcome(self, sid, outcome, pnl_r):
+    def close_trade(self, sid: int, close_price: float,
+                    outcome: str, pnl_usd: float, pnl_r: float):
+        """
+        Close a trade: record outcome, close price, update account balance.
+        This is how PnL compounds into the account.
+        """
+        close_ts = datetime.utcnow().isoformat()
+        with self.conn() as c:
+            c.execute(
+                "UPDATE signals SET status='CLOSED', outcome=?, pnl_r=?, "
+                "pnl_usd=?, close_price=?, close_ts=? WHERE id=?",
+                (outcome, pnl_r, pnl_usd, close_price, close_ts, sid)
+            )
+        # Compound PnL into account
+        self.add_pnl(pnl_usd, f"Trade #{sid} {outcome}")
+        # Update daily goal
+        self._update_daily_goal(pnl_usd)
+        return self.get_balance()
+
+    def update_outcome(self, sid: int, outcome: str, pnl_r: float):
+        """Legacy method — kept for compatibility."""
         with self.conn() as c:
             c.execute(
                 "UPDATE signals SET status='CLOSED', outcome=?, pnl_r=? WHERE id=?",
                 (outcome, pnl_r, sid)
             )
 
-    def get_stats(self, strategy):
+    def auto_close_open_trades(self, current_price: float):
+        """
+        Check all OPEN trades against current price.
+        Auto-close if SL or TP has been hit.
+        Returns list of closed trade dicts.
+        """
+        open_trades = self.get_signals(status="OPEN")
+        closed = []
+        for _, row in open_trades.iterrows():
+            sid  = int(row["id"])
+            dire = row["direction"]
+            sl   = float(row["sl"])
+            tp   = float(row["tp"])
+            lots = float(row.get("lots", 0.01))
+            risk = float(row.get("risk_usd", 0))
+
+            hit_tp = (dire == "long"  and current_price >= tp) or \
+                     (dire == "short" and current_price <= tp)
+            hit_sl = (dire == "long"  and current_price <= sl) or \
+                     (dire == "short" and current_price >= sl)
+
+            if hit_tp:
+                rr      = float(row["rr"])
+                pnl_usd = risk * rr
+                pnl_r   = rr
+                self.close_trade(sid, current_price, "WIN", pnl_usd, pnl_r)
+                closed.append({"id": sid, "outcome": "WIN", "pnl_usd": pnl_usd})
+            elif hit_sl:
+                pnl_usd = -risk
+                pnl_r   = -1.0
+                self.close_trade(sid, current_price, "LOSS", pnl_usd, pnl_r)
+                closed.append({"id": sid, "outcome": "LOSS", "pnl_usd": pnl_usd})
+
+        return closed
+
+    # ── DAILY GOAL ────────────────────────────────────────────────────────────
+    def _update_daily_goal(self, pnl_usd: float):
+        today = date.today().isoformat()
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO daily_goal (date_str, target_usd, achieved, trades) "
+                "VALUES (?,20.0,?,1) ON CONFLICT(date_str) DO UPDATE SET "
+                "achieved=achieved+?, trades=trades+1",
+                (today, pnl_usd, pnl_usd)
+            )
+
+    def get_daily_goal(self, date_str=None) -> dict:
+        if date_str is None:
+            date_str = date.today().isoformat()
         with self.conn() as c:
             row = c.execute(
-                "SELECT wins,losses,consec_loss,sharpe,active FROM strategy_stats WHERE strategy=?",
+                "SELECT target_usd, achieved, trades FROM daily_goal WHERE date_str=?",
+                (date_str,)
+            ).fetchone()
+        if row:
+            return {"target": row[0], "achieved": round(row[1], 2),
+                    "trades": row[2], "pct": round(row[1] / row[0] * 100, 1)}
+        return {"target": 20.0, "achieved": 0.0, "trades": 0, "pct": 0.0}
+
+    # ── QUERIES ───────────────────────────────────────────────────────────────
+    def get_signals(self, limit=500, status=None) -> pd.DataFrame:
+        with self.conn() as c:
+            if status:
+                return pd.read_sql(
+                    f"SELECT * FROM signals WHERE status=? ORDER BY id DESC LIMIT {limit}",
+                    c, params=(status,)
+                )
+            return pd.read_sql(
+                f"SELECT * FROM signals ORDER BY id DESC LIMIT {limit}", c
+            )
+
+    def get_open_signals(self) -> pd.DataFrame:
+        return self.get_signals(limit=50, status="OPEN")
+
+    def get_stats(self, strategy) -> dict:
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT wins,losses,consec_loss,sharpe,active "
+                "FROM strategy_stats WHERE strategy=?",
                 (strategy,)
             ).fetchone()
         if row:
@@ -104,64 +277,23 @@ class Database:
         with self.conn() as c:
             c.execute(
                 "INSERT INTO strategy_stats "
-                "(strategy,wins,losses,consec_loss,sharpe,active,last_update)"
-                " VALUES (?,?,?,?,?,?,?)"
-                " ON CONFLICT(strategy) DO UPDATE SET"
-                "  wins=excluded.wins, losses=excluded.losses,"
-                "  consec_loss=excluded.consec_loss, sharpe=excluded.sharpe,"
-                "  active=excluded.active, last_update=excluded.last_update",
+                "(strategy,wins,losses,consec_loss,sharpe,active,last_update) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(strategy) DO UPDATE SET "
+                "wins=excluded.wins, losses=excluded.losses, "
+                "consec_loss=excluded.consec_loss, sharpe=excluded.sharpe, "
+                "active=excluded.active, last_update=excluded.last_update",
                 (strategy, st["wins"], st["losses"], st["consec_loss"],
-                 st["sharpe"], int(st["active"]),
-                 datetime.utcnow().isoformat())
+                 st["sharpe"], int(st["active"]), datetime.utcnow().isoformat())
             )
 
-    def get_signals(self, limit=200, status=None):
+    def summary_stats(self) -> dict:
         with self.conn() as c:
-            if status:
-                return pd.read_sql(
-                    f"SELECT * FROM signals WHERE status=? ORDER BY id DESC LIMIT {limit}",
-                    c, params=(status,)
-                )
-            return pd.read_sql(
-                f"SELECT * FROM signals ORDER BY id DESC LIMIT {limit}", c
-            )
-
-    def get_daily_signals(self, date_str):
-        """Get all signals for a specific date."""
-        with self.conn() as c:
-            return pd.read_sql(
-                "SELECT * FROM signals WHERE ts LIKE ? ORDER BY id DESC",
-                c, params=(f"{date_str}%",)
-            )
-
-    def get_open_signals(self):
-        return self.get_signals(limit=50, status="OPEN")
-
-    def save_wfo(self, strategy, params_str, is_sh, oos_sh, is_wr, oos_wr):
-        with self.conn() as c:
-            c.execute(
-                "INSERT INTO wfo_runs "
-                "(ts,strategy,params,is_sharpe,oos_sharpe,is_winrate,oos_winrate)"
-                " VALUES (?,?,?,?,?,?,?)",
-                (datetime.utcnow().isoformat(), strategy, params_str,
-                 is_sh, oos_sh, is_wr, oos_wr)
-            )
-
-    def get_wfo_history(self, limit=20):
-        with self.conn() as c:
-            return pd.read_sql(
-                f"SELECT * FROM wfo_runs ORDER BY id DESC LIMIT {limit}", c
-            )
-
-    def summary_stats(self):
-        """Return quick summary statistics."""
-        with self.conn() as c:
-            total = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
-            open_ = c.execute("SELECT COUNT(*) FROM signals WHERE status='OPEN'").fetchone()[0]
-            wins  = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='WIN'").fetchone()[0]
-            losses= c.execute("SELECT COUNT(*) FROM signals WHERE outcome='LOSS'").fetchone()[0]
-            avg_score = c.execute("SELECT AVG(score) FROM signals WHERE score > 0").fetchone()[0]
-            total_pnl = c.execute("SELECT SUM(pnl_r) FROM signals WHERE status='CLOSED'").fetchone()[0]
+            total    = c.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            open_    = c.execute("SELECT COUNT(*) FROM signals WHERE status='OPEN'").fetchone()[0]
+            wins     = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='WIN'").fetchone()[0]
+            losses   = c.execute("SELECT COUNT(*) FROM signals WHERE outcome='LOSS'").fetchone()[0]
+            avg_sc   = c.execute("SELECT AVG(score) FROM signals WHERE score>0").fetchone()[0]
+            total_pnl= c.execute("SELECT SUM(pnl_usd) FROM signals WHERE status='CLOSED'").fetchone()[0]
         wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
         return {
             "total_signals": total,
@@ -169,6 +301,6 @@ class Database:
             "wins":          wins,
             "losses":        losses,
             "win_rate":      round(wr, 1),
-            "avg_score":     round(avg_score, 2) if avg_score else 0,
-            "total_pnl_r":   round(total_pnl, 2) if total_pnl else 0,
+            "avg_score":     round(avg_sc, 2) if avg_sc else 0,
+            "total_pnl_usd": round(total_pnl, 2) if total_pnl else 0,
         }
