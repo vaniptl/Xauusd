@@ -35,7 +35,7 @@ with cc3:
         key="chart_sr_tfs"
     )
 with cc4:
-    refresh = st.button("↺  REFRESH DATA", use_container_width=True)
+    refresh = st.button("↺  REFRESH DATA", width='stretch')
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_chart_data(timeframe):
@@ -207,7 +207,7 @@ for i in range(1, 5):
         row=i, col=1,
     )
 
-st.plotly_chart(fig, use_container_width=True, config={
+st.plotly_chart(fig, width='stretch', config={
     "displayModeBar": True,
     "modeBarButtonsToRemove": ["pan2d","lasso2d","select2d","autoScale2d"],
     "displaylogo": False,
