@@ -119,7 +119,7 @@ st.dataframe(
             ("letter-spacing", "1px"), ("border-bottom", "1px solid #1e2736"),
         ]}
     ]),
-    use_container_width=True, height=250
+    width='stretch', height=250
 )
 
 # ── NEXT BUY/SELL LEVELS ──────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ fig_dd.update_layout(
     plot_bgcolor="#0a0c10", paper_bgcolor="#0a0c10",
     font=dict(family="IBM Plex Mono", color="#c8d0e0"),
 )
-st.plotly_chart(fig_dd, use_container_width=True, config={"displayModeBar": False})
+st.plotly_chart(fig_dd, width='stretch', config={"displayModeBar": False})
 
 # ── MONTHLY PROFIT % FROM DATABASE ────────────────────────────────────────────
 st.markdown("---")
@@ -288,7 +288,7 @@ if not signals_df.empty and "pnl_r" in signals_df.columns:
             xaxis=dict(gridcolor="#1e2736", tickfont=dict(size=9)),
             yaxis=dict(gridcolor="#1e2736", tickfont=dict(size=9), ticksuffix="%"),
         )
-        st.plotly_chart(fig_mp, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_mp, width='stretch', config={"displayModeBar": False})
     else:
         st.markdown("""
         <div style="background:#0d111a;border:1px solid #1e2736;padding:16px;text-align:center;
