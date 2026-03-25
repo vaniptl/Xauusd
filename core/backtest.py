@@ -1,331 +1,175 @@
-import streamlit as st
-import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import pandas as pd
+from core.config import CONFIG, REGIME_LABELS, REGIME_WEIGHTS
+from core.regime import RegimeClassifier
 
-from core.terminal_theme import TERMINAL_CSS, section_header
-from core.data_engine import DataEngine
-from core.backtest import BacktestEngine
-from core.config import REGIME_LABELS, STRATEGY_DISPLAY
 
-st.set_page_config(page_title="BACKTEST // XAUUSD", layout="wide")
-st.markdown(TERMINAL_CSS, unsafe_allow_html=True)
+class BacktestEngine:
 
-st.markdown("""
-<div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;
-            color:#f0a500;letter-spacing:2px;border-bottom:1px solid #1e2736;
-            padding-bottom:8px;margin-bottom:14px">
-◈ BACKTEST ENGINE // MULTI-PERIOD REGIME PERFORMANCE ANALYSIS
-</div>
-""", unsafe_allow_html=True)
+    def _make_signals(self, df, strategy, p):
+        sigs = pd.Series(0, index=df.index)
+        ef  = df.get("ema_fast", pd.Series(index=df.index))
+        em  = df.get("ema_med",  pd.Series(index=df.index))
+        es  = df.get("ema_slow", pd.Series(index=df.index))
+        rsi = df.get("rsi",      pd.Series(50, index=df.index))
+        vr  = df.get("vol_ratio", pd.Series(1.0, index=df.index))
+        if strategy == "ema_momentum":
+            sigs[(ef > em) & (em > es) & (rsi < p.get("rsi_up", 65))]  =  1
+            sigs[(ef < em) & (em < es) & (rsi > p.get("rsi_dn", 35))]  = -1
+        elif strategy == "trend_continuation":
+            t = p.get("tol", 0.002)
+            sigs[(ef > es) & (df["close"] > em * (1 - t))] =  1
+            sigs[(ef < es) & (df["close"] < em * (1 + t))] = -1
+        elif strategy == "breakout_expansion":
+            vm = p.get("vm", 1.5)
+            sigs[(df["close"] > df["close"].shift(1)) & (vr >= vm)] =  1
+            sigs[(df["close"] < df["close"].shift(1)) & (vr >= vm)] = -1
+        elif strategy == "liquidity_sweep":
+            lk  = p.get("lk", 5)
+            sl2 = df["low"].rolling(lk).min()
+            sh2 = df["high"].rolling(lk).max()
+            sigs[(df["low"] < sl2.shift(1)) & (df["close"] > sl2.shift(1))]  =  1
+            sigs[(df["high"] > sh2.shift(1)) & (df["close"] < sh2.shift(1))] = -1
+        return sigs.shift(1).fillna(0)
 
-# ── PERIOD/TIMEFRAME MATRIX ───────────────────────────────────────────────────
-PERIODS = {
-    "1 Month": {
-        "yf_period": "1mo",
-        "timeframes": ["15M", "1H", "4H"],
-        "intervals":  {"15M": "15m", "1H": "1h", "4H": "1h"},
-        "desc": "15M · 1H · 4H",
-    },
-    "3 Months": {
-        "yf_period": "3mo",
-        "timeframes": ["1H", "4H", "1D"],
-        "intervals":  {"1H": "1h", "4H": "1h", "1D": "1d"},
-        "desc": "1H · 4H · 1D",
-    },
-    "6 Months": {
-        "yf_period": "6mo",
-        "timeframes": ["1H", "4H", "1D"],
-        "intervals":  {"1H": "1h", "4H": "1h", "1D": "1d"},
-        "desc": "1H · 4H · 1D",
-    },
-    "1 Year": {
-        "yf_period": "1y",
-        "timeframes": ["4H", "1D"],
-        "intervals":  {"4H": "1h", "1D": "1d"},
-        "desc": "4H · 1D",
-    },
-}
+    def run_strategy(self, df, strategy, sl_pct=0.008, tp_pct=0.016,
+                     balance=10000, risk_pct=0.01):
+        p = {"sl": sl_pct, "tp": tp_pct}
+        sigs = self._make_signals(df, strategy, p)
+        return self._simulate(df, sigs, sl_pct, tp_pct, balance, risk_pct)
 
-# ── CONTROLS ──────────────────────────────────────────────────────────────────
-c1, c2, c3 = st.columns([1.4, 1, 1])
-with c1:
-    sel_period = st.selectbox("Backtest Period", list(PERIODS.keys()), key="bt_period")
-with c2:
-    balance = st.number_input("Balance ($)", value=10000, min_value=1000, step=1000)
-with c3:
-    run_btn = st.button("▶  RUN BACKTEST", width='stretch')
+    def _simulate(self, df, signals, sl_pct, tp_pct, balance, risk_pct):
+        eq = [balance]; trades = []
+        in_t = False; dir_ = 0; ep = sl = tp = 0.0
+        entry_idx = None
 
-pcfg   = PERIODS[sel_period]
-sel_tf = st.selectbox("Primary Timeframe", pcfg["timeframes"], key="bt_tf")
+        for i in range(1, len(df)):
+            row = df.iloc[i]; sig = signals.iloc[i - 1]
+            if not in_t and sig != 0:
+                dir_ = sig; ep = row["open"]
+                sl = ep * (1 - sl_pct) if dir_ == 1 else ep * (1 + sl_pct)
+                tp = ep * (1 + tp_pct) if dir_ == 1 else ep * (1 - tp_pct)
+                in_t = True; entry_idx = i
+            elif in_t:
+                hit_sl = (dir_ == 1 and row["low"] <= sl) or \
+                         (dir_ == -1 and row["high"] >= sl)
+                hit_tp = (dir_ == 1 and row["high"] >= tp) or \
+                         (dir_ == -1 and row["low"] <= tp)
+                if hit_sl:
+                    balance -= balance * risk_pct
+                    trades.append({"win": False, "pnl": -balance * risk_pct,
+                                   "date": row.name, "dir": dir_})
+                    in_t = False
+                elif hit_tp:
+                    rr = tp_pct / sl_pct
+                    balance += balance * risk_pct * rr
+                    trades.append({"win": True, "pnl": balance * risk_pct * rr,
+                                   "date": row.name, "dir": dir_})
+                    in_t = False
+            eq.append(balance)
 
-st.markdown(f"""
-<div style="background:#0d111a;border:1px solid #1e2736;padding:7px 14px;
-            font-family:IBM Plex Mono,monospace;font-size:9px;
-            display:flex;gap:20px;margin-bottom:10px">
-  <span style="color:#4a5568">PERIOD</span><span style="color:#f0a500">{sel_period.upper()}</span>
-  <span style="color:#4a5568">TF</span><span style="color:#4da8f0">{sel_tf}</span>
-  <span style="color:#4a5568">ALL TFs</span><span style="color:#c8d0e0">{pcfg['desc']}</span>
-</div>
-""", unsafe_allow_html=True)
+        return self._metrics(np.array(eq), trades, eq[0])
 
-# ── FETCH ──────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_bt_data(period_key, tf_name):
-    p   = PERIODS[period_key]
-    inv = p["intervals"][tf_name]
-    de  = DataEngine()
-    df  = de.fetch_history(period=p["yf_period"], interval=inv)
-    if tf_name == "4H" and inv == "1h":
-        df = df.resample("4h").agg({"open":"first","high":"max",
-                                     "low":"min","close":"last","volume":"sum"}).dropna()
-    return de.add_indicators(df)
+    def _metrics(self, eq, trades, initial):
+        ret  = np.diff(eq) / eq[:-1]
+        wins = [t for t in trades if t["win"]]
+        loss = [t for t in trades if not t["win"]]
+        sh   = (ret.mean() / (ret.std() + 1e-10)) * np.sqrt(252 * 24)
+        peak = eq[0]; mdd = 0
+        for e in eq:
+            if e > peak: peak = e
+            mdd = max(mdd, (peak - e) / peak)
+        pf = abs(sum(t["pnl"] for t in wins) /
+                 (sum(abs(t["pnl"]) for t in loss) + 1e-10))
+        return {
+            "sharpe":        round(sh, 3),
+            "win_rate":      round(len(wins) / max(len(trades), 1), 3),
+            "total_trades":  len(trades),
+            "wins":          len(wins),
+            "losses":        len(loss),
+            "total_pnl":     round(eq[-1] - initial, 2),
+            "final_balance": round(eq[-1], 2),
+            "pnl_pct":       round((eq[-1] - initial) / initial * 100, 2),
+            "max_drawdown":  round(mdd * 100, 2),
+            "profit_factor": round(pf, 3),
+            "trades":        trades,
+            "equity_curve":  eq.tolist(),
+        }
 
-state_key = f"bt_{sel_period}_{sel_tf}"
+    def run_full_backtest(self, df, balance=10000):
+        """Run all 4 strategies on 1-year data, return per-strategy + per-regime results."""
+        results = {}
+        default_params = {"sl_pct": 0.008, "tp_pct": 0.016}
 
-if not (run_btn or st.session_state.get(state_key)):
-    # Landing state - show period grid
-    st.markdown("""
-    <div style="background:#0d111a;border:1px solid #1e2736;border-top:2px solid #f0a500;
-                padding:30px;text-align:center;font-family:IBM Plex Mono,monospace;margin-bottom:16px">
-      <div style="font-size:12px;color:#c8d0e0;letter-spacing:1px;margin-bottom:16px">
-        SELECT PERIOD + TIMEFRAME THEN CLICK RUN BACKTEST
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-    pg = st.columns(4)
-    for col, (pname, pdata) in zip(pg, PERIODS.items()):
-        is_sel = pname == sel_period
-        col.markdown(f"""
-        <div style="border:1px solid {'#f0a500' if is_sel else '#1e2736'};
-                    {'border-top:2px solid #f0a500;' if is_sel else ''}
-                    padding:12px;font-family:IBM Plex Mono,monospace">
-          <div style="font-size:11px;font-weight:600;
-                      color:{'#f0a500' if is_sel else '#c8d0e0'};margin-bottom:5px">
-            {pname.upper()}
-          </div>
-          <div style="font-size:9px;color:#4a5568;line-height:1.8">
-            TFs: <span style="color:#4da8f0">{pdata['desc']}</span><br>
-            Data: <span style="color:#26d17a">{pdata['yf_period']}</span>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-    st.stop()
+        for strategy in CONFIG["strategies"]:
+            r = self.run_strategy(
+                df, strategy,
+                sl_pct=default_params["sl_pct"],
+                tp_pct=default_params["tp_pct"],
+                balance=balance
+            )
+            results[strategy] = r
 
-if run_btn:
-    st.session_state[state_key] = True
+        return results
 
-with st.spinner(f"FETCHING {sel_period.upper()} {sel_tf} DATA..."):
-    df_bt = get_bt_data(sel_period, sel_tf)
+    def run_regime_backtest(self, df, balance=10000):
+        """Run backtest segmented by regime."""
+        rc = RegimeClassifier()
 
-if df_bt is None or df_bt.empty:
-    st.error("No data. Try another period/timeframe combo.")
-    st.stop()
+        # Tag each bar with regime
+        df = df.copy()
+        regimes = []
+        window = CONFIG["regime"]["atr_lookback"]
+        for i in range(len(df)):
+            lb = df.iloc[max(0, i - window):i + 1]
+            row = df.iloc[i]
+            r = rc.classify_bar(row, lb)
+            regimes.append(r)
+        df["regime"] = regimes
 
-date_f = df_bt.index[0].strftime("%Y-%m-%d")
-date_t = df_bt.index[-1].strftime("%Y-%m-%d")
-st.markdown(f"""
-<div style="background:#0d111a;border:1px solid #1e2736;padding:6px 14px;
-            font-family:IBM Plex Mono,monospace;font-size:9px;display:flex;gap:20px;margin-bottom:6px">
-  <span style="color:#26d17a">● DATA LOADED</span>
-  <span style="color:#4a5568">BARS</span><span style="color:#c8d0e0">{len(df_bt)}</span>
-  <span style="color:#4a5568">FROM</span><span style="color:#c8d0e0">{date_f}</span>
-  <span style="color:#4a5568">TO</span><span style="color:#c8d0e0">{date_t}</span>
-</div>
-""", unsafe_allow_html=True)
+        regime_results = {}
+        all_regimes = df["regime"].unique()
 
-bt = BacktestEngine()
-with st.spinner("RUNNING 4 STRATEGIES..."):
-    full_r = bt.run_full_backtest(df_bt, balance=balance)
-with st.spinner("SEGMENTING BY REGIME..."):
-    regime_r, df_tagged = bt.run_regime_backtest(df_bt, balance=balance)
+        for regime in all_regimes:
+            regime_df = df[df["regime"] == regime].copy()
+            if len(regime_df) < 50:
+                continue
+            strategy_results = {}
+            for strategy in CONFIG["strategies"]:
+                r = self.run_strategy(
+                    regime_df, strategy,
+                    sl_pct=0.008, tp_pct=0.016,
+                    balance=balance
+                )
+                strategy_results[strategy] = r
+            # Find best strategy for this regime
+            best_strat = max(
+                strategy_results,
+                key=lambda s: strategy_results[s]["sharpe"]
+            )
+            regime_results[regime] = {
+                "strategies": strategy_results,
+                "best_strategy": best_strat,
+                "bars": len(regime_df),
+                "pct_of_time": round(len(regime_df) / len(df) * 100, 1),
+            }
 
-# ── STRATEGY CARDS ─────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(section_header(f"ALL STRATEGIES — {sel_period.upper()} / {sel_tf}",
-                            f"{date_f} → {date_t}"), unsafe_allow_html=True)
+        return regime_results, df
 
-strat_order = ["liquidity_sweep","trend_continuation","breakout_expansion","ema_momentum"]
-best_s      = max(strat_order, key=lambda s: full_r[s]["sharpe"])
-cols        = st.columns(4)
-
-for i, strat in enumerate(strat_order):
-    r       = full_r[strat]
-    is_best = strat == best_s
-    sh_c    = "#26d17a" if r["sharpe"]>0.5 else "#f0a500" if r["sharpe"]>0 else "#e05555"
-    pnl_c   = "#26d17a" if r["total_pnl"]>=0 else "#e05555"
-    wr_c    = "#26d17a" if r["win_rate"]>=0.55 else "#f0a500" if r["win_rate"]>=0.45 else "#e05555"
-    with cols[i]:
-        st.markdown(f"""
-        <div style="background:#0d111a;border:1px solid {'#f0a500' if is_best else '#1e2736'};
-                    {'border-top:2px solid #f0a500;' if is_best else ''}padding:12px;
-                    font-family:IBM Plex Mono,monospace">
-          <div style="font-size:9px;color:{'#f0a500' if is_best else '#4a5568'};
-                      text-transform:uppercase;letter-spacing:1.5px;
-                      margin-bottom:8px;border-bottom:1px solid #1e2736;padding-bottom:4px">
-            {STRATEGY_DISPLAY[strat]}{"  ★ BEST" if is_best else ""}
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;font-size:10px">
-            <div><div style="color:#4a5568;font-size:7px">SHARPE</div>
-                 <div style="color:{sh_c};font-weight:600;font-size:15px">{r['sharpe']:.2f}</div></div>
-            <div><div style="color:#4a5568;font-size:7px">WIN RATE</div>
-                 <div style="color:{wr_c};font-weight:600;font-size:15px">{r['win_rate']*100:.0f}%</div></div>
-            <div><div style="color:#4a5568;font-size:7px">TRADES</div>
-                 <div style="color:#c8d0e0">{r['total_trades']}</div></div>
-            <div><div style="color:#4a5568;font-size:7px">PROFIT FACTOR</div>
-                 <div style="color:#c8d0e0">{r['profit_factor']:.2f}</div></div>
-            <div><div style="color:#4a5568;font-size:7px">MAX DD</div>
-                 <div style="color:#e05555">{r['max_drawdown']:.1f}%</div></div>
-            <div><div style="color:#4a5568;font-size:7px">P&L</div>
-                 <div style="color:{pnl_c};font-weight:600">{r['pnl_pct']:+.1f}%</div></div>
-          </div>
-          <div style="height:2px;background:#1e2736;margin-top:8px">
-            <div style="height:2px;width:{min(abs(r['sharpe'])/2*100,100):.0f}%;
-                        background:{sh_c}"></div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# ── EQUITY CURVES ─────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(section_header("EQUITY CURVES"), unsafe_allow_html=True)
-
-ec_c = {"liquidity_sweep":"#f0a500","trend_continuation":"#26d17a",
-         "breakout_expansion":"#4da8f0","ema_momentum":"#a855f7"}
-fig_eq = go.Figure()
-for s in strat_order:
-    eq = full_r[s].get("equity_curve", [])
-    if eq:
-        fig_eq.add_trace(go.Scatter(y=eq, line=dict(width=1.5, color=ec_c[s]),
-                                     name=STRATEGY_DISPLAY[s]))
-fig_eq.add_hline(y=balance, line_dash="dot", line_color="#4a5568", line_width=0.8)
-fig_eq.update_layout(
-    height=240, plot_bgcolor="#0a0c10", paper_bgcolor="#0a0c10",
-    font=dict(family="IBM Plex Mono", color="#c8d0e0", size=10),
-    margin=dict(l=50, r=20, t=10, b=30),
-    legend=dict(orientation="h", y=1.02, font=dict(size=9), bgcolor="rgba(0,0,0,0)"),
-    xaxis=dict(gridcolor="#1e2736", tickfont=dict(size=8)),
-    yaxis=dict(gridcolor="#1e2736", tickfont=dict(size=8), tickprefix="$"),
-)
-st.plotly_chart(fig_eq, width='stretch', config={"displayModeBar": False})
-
-# ── REGIME TABLE ──────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(section_header("REGIME BREAKDOWN — BEST STRATEGY PER STATE"), unsafe_allow_html=True)
-
-if regime_r:
-    rows = []
-    for regime, data in sorted(regime_r.items(), key=lambda x: -x[1]["pct_of_time"]):
-        best   = data["best_strategy"]
-        best_r = data["strategies"][best]
-        rows.append({
-            "REGIME":        REGIME_LABELS.get(regime, regime),
-            "% OF PERIOD":   f"{data['pct_of_time']:.0f}%",
-            "BARS":          data["bars"],
-            "BEST STRATEGY": STRATEGY_DISPLAY[best],
-            "SHARPE":        f"{best_r['sharpe']:.2f}",
-            "WIN %":         f"{best_r['win_rate']*100:.0f}%",
-            "P&L %":         f"{best_r['pnl_pct']:+.1f}%",
-        })
-    df_rsum = pd.DataFrame(rows)
-    st.dataframe(
-        df_rsum.style.set_properties(**{
-            "font-family":"IBM Plex Mono,monospace","font-size":"11px",
-            "background":"#0d111a","color":"#c8d0e0",
-        }).set_table_styles([{"selector":"th","props":[
-            ("background","#06080c"),("color","#f0a500"),("font-size","9px"),
-            ("text-transform","uppercase"),("letter-spacing","1px"),
-            ("border-bottom","1px solid #1e2736"),
-        ]}]),
-        width='stretch', hide_index=True,
-    )
-
-    st.markdown("---")
-    for regime, data in sorted(regime_r.items(), key=lambda x: -x[1]["pct_of_time"]):
-        rl     = REGIME_LABELS.get(regime, regime)
-        rc_col = {"TRENDING BULL":"#26d17a","TRENDING BEAR":"#e05555",
-                  "RANGING":"#f0a500","HIGH VOL/NEWS":"#e05555","LOW LIQ GRIND":"#4da8f0"}.get(rl,"#c8d0e0")
-        best   = data["best_strategy"]
-        with st.expander(
-            f"  {rl}  ·  {data['pct_of_time']:.0f}% of period  ·  BEST: {STRATEGY_DISPLAY[best]}",
-            expanded=False
-        ):
-            rc = st.columns(4)
-            for col, strat in zip(rc, strat_order):
-                r       = data["strategies"][strat]
-                is_best = strat == best
-                sh_c    = "#26d17a" if r["sharpe"]>0 else "#e05555"
-                pnl_c   = "#26d17a" if r["pnl_pct"]>=0 else "#e05555"
-                with col:
-                    st.markdown(f"""
-                    <div style="background:#0d111a;border:1px solid {'#f0a500' if is_best else '#1e2736'};
-                                padding:10px;font-family:IBM Plex Mono,monospace;
-                                {'border-top:2px solid '+rc_col+';' if is_best else ''}">
-                      <div style="font-size:8px;color:{'#f0a500' if is_best else '#4a5568'};
-                                  text-transform:uppercase;letter-spacing:1px;margin-bottom:5px">
-                        {STRATEGY_DISPLAY[strat]}{"  ★" if is_best else ""}
-                      </div>
-                      <div style="font-size:10px;display:grid;grid-template-columns:1fr 1fr;gap:3px">
-                        <div><div style="color:#4a5568;font-size:7px">SHARPE</div>
-                             <div style="color:{sh_c}">{r['sharpe']:.2f}</div></div>
-                        <div><div style="color:#4a5568;font-size:7px">WIN%</div>
-                             <div style="color:#c8d0e0">{r['win_rate']*100:.0f}%</div></div>
-                        <div><div style="color:#4a5568;font-size:7px">TRADES</div>
-                             <div style="color:#c8d0e0">{r['total_trades']}</div></div>
-                        <div><div style="color:#4a5568;font-size:7px">P&L%</div>
-                             <div style="color:{pnl_c}">{r['pnl_pct']:+.1f}%</div></div>
-                      </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-# ── MONTHLY P&L ────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(section_header("MONTHLY P&L"), unsafe_allow_html=True)
-
-mo_strat = st.selectbox("Strategy", strat_order,
-                         format_func=lambda s: STRATEGY_DISPLAY[s],
-                         index=strat_order.index(best_s), key="mo_bt")
-mo_df    = bt.monthly_equity(df_bt, mo_strat, balance=balance)
-
-if not mo_df.empty:
-    fig_m = go.Figure(go.Bar(
-        x=[str(r) for r in mo_df["month"]],
-        y=mo_df["pnl"].round(2).tolist(),
-        marker_color=["#26d17a" if v>=0 else "#e05555" for v in mo_df["pnl"]],
-        text=[f"${v:+.0f}" for v in mo_df["pnl"]],
-        textfont=dict(family="IBM Plex Mono",size=9,color="#c8d0e0"),
-        textposition="outside",
-    ))
-    fig_m.add_hline(y=0, line_color="#4a5568", line_width=0.5)
-    fig_m.update_layout(
-        height=200, plot_bgcolor="#0a0c10", paper_bgcolor="#0a0c10",
-        font=dict(family="IBM Plex Mono",color="#c8d0e0",size=10),
-        margin=dict(l=50,r=20,t=20,b=30),
-        xaxis=dict(gridcolor="#1e2736",tickfont=dict(size=8)),
-        yaxis=dict(gridcolor="#1e2736",tickfont=dict(size=9),tickprefix="$"),
-    )
-    st.plotly_chart(fig_m, width='stretch', config={"displayModeBar":False})
-
-    disp = mo_df.copy()
-    disp["month"]    = disp["month"].astype(str)
-    disp["pnl_pct"]  = (disp["pnl"]/balance*100).round(2)
-    disp["win_rate"] = disp["win_rate"].round(1)
-    disp["pnl"]      = disp["pnl"].round(2)
-    disp.columns     = ["Month","P&L ($)","Trades","Wins","Win Rate (%)","P&L (%)"]
-    st.dataframe(
-        disp.style.map(
-            lambda v: "color:#26d17a" if isinstance(v,(int,float)) and v>0
-                      else "color:#e05555" if isinstance(v,(int,float)) and v<0 else "",
-            subset=["P&L ($)","P&L (%)"]
-        ).set_properties(**{
-            "font-family":"IBM Plex Mono,monospace","font-size":"11px",
-            "background":"#0d111a","color":"#c8d0e0",
-        }).set_table_styles([{"selector":"th","props":[
-            ("background","#06080c"),("color","#f0a500"),("font-size","9px"),
-            ("text-transform","uppercase"),("letter-spacing","1px"),
-            ("border-bottom","1px solid #1e2736"),
-        ]}]),
-        width='stretch', hide_index=True,
-    )
+    def monthly_equity(self, df, strategy, balance=10000):
+        """Return monthly P&L breakdown."""
+        r = self.run_strategy(df, strategy, balance=balance)
+        trades = r.get("trades", [])
+        if not trades:
+            return pd.DataFrame()
+        tdf = pd.DataFrame(trades)
+        tdf["date"] = pd.to_datetime(tdf["date"])
+        tdf["month"] = tdf["date"].dt.to_period("M")
+        monthly = tdf.groupby("month").agg(
+            pnl=("pnl", "sum"),
+            trades=("pnl", "count"),
+            wins=("win", "sum")
+        ).reset_index()
+        monthly["win_rate"] = (monthly["wins"] / monthly["trades"] * 100).round(1)
+        monthly["pnl"] = monthly["pnl"].round(2)
+        return monthly
