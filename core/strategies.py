@@ -9,7 +9,7 @@ Strategy Engine — 5 strategies:
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from core.config import CONFIG
 
@@ -27,7 +27,7 @@ class Signal:
     session:   str
     timeframe: str
     notes:     str = ""
-    ts: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    ts: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class SessionAnalyzer:
@@ -36,7 +36,7 @@ class SessionAnalyzer:
 
     def get(self, dt=None):
         if dt is None:
-            dt = datetime.utcnow()
+            dt = datetime.now(timezone.utc)
         h = dt.hour
         if self.s["london"]["start"] <= h < self.s["london"]["end"]:   return "london"
         if self.s["ny"]["start"]     <= h < self.s["ny"]["end"]:       return "ny"
@@ -49,11 +49,11 @@ class SessionAnalyzer:
         return True
 
     def is_london_open(self, dt=None):
-        if dt is None: dt = datetime.utcnow()
+        if dt is None: dt = datetime.now(timezone.utc)
         return self.s["london"]["start"] <= dt.hour < self.s["london"]["start"] + 2
 
     def is_ny_open(self, dt=None):
-        if dt is None: dt = datetime.utcnow()
+        if dt is None: dt = datetime.now(timezone.utc)
         return self.s["ny"]["start"] <= dt.hour < self.s["ny"]["start"] + 2
 
 
@@ -228,7 +228,7 @@ class StrategyEngine:
 
         # Only run during London open OR NY open (first 2 hours each)
         sa  = SessionAnalyzer()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         is_london_open = sa.is_london_open(now)
         is_ny_open     = sa.is_ny_open(now)
         if not (is_london_open or is_ny_open):
